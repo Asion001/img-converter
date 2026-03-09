@@ -11,12 +11,14 @@ const {
   mockReadFile,
   mockDeleteFile,
   mockLoad,
+  mockToBlobURL,
 } = vi.hoisted(() => ({
   mockExec: vi.fn().mockResolvedValue(0),
   mockWriteFile: vi.fn().mockResolvedValue(undefined),
   mockReadFile: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])),
   mockDeleteFile: vi.fn().mockResolvedValue(undefined),
   mockLoad: vi.fn().mockResolvedValue(undefined),
+  mockToBlobURL: vi.fn().mockImplementation((url) => Promise.resolve(url)),
 }));
 
 vi.mock('@ffmpeg/ffmpeg', () => ({
@@ -31,7 +33,7 @@ vi.mock('@ffmpeg/ffmpeg', () => ({
 
 vi.mock('@ffmpeg/util', () => ({
   fetchFile: vi.fn().mockResolvedValue(new Uint8Array([0])),
-  toBlobURL: vi.fn().mockImplementation((url) => Promise.resolve(url)),
+  toBlobURL: mockToBlobURL,
 }));
 
 // JSZip is only used for downloadAll – provide a minimal mock
@@ -52,6 +54,7 @@ globalThis.URL.createObjectURL = vi.fn(() => `blob:test/${++blobCounter}`);
 globalThis.URL.revokeObjectURL = vi.fn();
 
 import App from '../App.jsx';
+import { FFmpeg } from '@ffmpeg/ffmpeg';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -85,6 +88,7 @@ describe('App – Convert All', () => {
     mockReadFile.mockResolvedValue(new Uint8Array([1, 2, 3]));
     mockDeleteFile.mockResolvedValue(undefined);
     mockLoad.mockResolvedValue(undefined);
+    mockToBlobURL.mockImplementation((url) => Promise.resolve(url));
   });
 
   it('renders the upload zone initially', () => {
@@ -229,5 +233,87 @@ describe('App – Convert All', () => {
     // We verify indirectly: URL.createObjectURL was called,
     // meaning the Blob was successfully created without errors.
     expect(URL.createObjectURL).toHaveBeenCalled();
+  });
+
+  it('shows "failed to import ffmpeg-core.js" error when all CDNs fail to load core', async () => {
+    mockLoad
+      .mockRejectedValueOnce(new Error('failed to import ffmpeg-core.js'))
+      .mockRejectedValueOnce(new Error('failed to import ffmpeg-core.js'));
+
+    render(<App />);
+    await addFiles([makePng('import-fail.png')]);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText(/Convert All/i));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Error')).toBeInTheDocument();
+      expect(screen.getByText(/failed to import ffmpeg-core\.js/)).toBeInTheDocument();
+    });
+  });
+
+  it('falls back to next CDN when first load fails', async () => {
+    // First CDN attempt rejects, second succeeds
+    mockLoad
+      .mockRejectedValueOnce(new Error('failed to import ffmpeg-core.js'))
+      .mockResolvedValueOnce(undefined);
+
+    render(<App />);
+    await addFiles([makePng('fallback.png')]);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText(/Convert All/i));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Done')).toBeInTheDocument();
+    });
+
+    // load() was called twice (once per CDN URL) and a fresh FFmpeg instance
+    // was created for each attempt so the second attempt is not poisoned.
+    expect(mockLoad).toHaveBeenCalledTimes(2);
+    expect(FFmpeg).toHaveBeenCalledTimes(2);
+  });
+
+  it('handles toBlobURL network failure gracefully', async () => {
+    // toBlobURL rejects for all calls (simulates network failure fetching core)
+    mockToBlobURL.mockRejectedValue(new Error('Failed to fetch'));
+
+    render(<App />);
+    await addFiles([makePng('network-fail.png')]);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText(/Convert All/i));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Error')).toBeInTheDocument();
+      expect(screen.getByText(/Failed to fetch/)).toBeInTheDocument();
+    });
+
+    // load() should never have been called since toBlobURL failed first
+    expect(mockLoad).not.toHaveBeenCalled();
+  });
+
+  it('creates a fresh FFmpeg instance for each CDN attempt', async () => {
+    // Both CDN loads fail — verify a new FFmpeg instance was created per attempt
+    mockLoad
+      .mockRejectedValueOnce(new Error('failed to import ffmpeg-core.js'))
+      .mockRejectedValueOnce(new Error('failed to import ffmpeg-core.js'));
+
+    render(<App />);
+    await addFiles([makePng('instance.png')]);
+
+    await act(async () => {
+      fireEvent.click(screen.getByText(/Convert All/i));
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('Error')).toBeInTheDocument();
+    });
+
+    // A fresh FFmpeg instance should be created for each CDN URL attempt
+    expect(FFmpeg).toHaveBeenCalledTimes(2);
   });
 });
