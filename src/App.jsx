@@ -6,7 +6,10 @@ import FileUpload from './components/FileUpload.jsx';
 import ConversionSettings from './components/ConversionSettings.jsx';
 import ImageList from './components/ImageList.jsx';
 
-const FFMPEG_BASE_URL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
+const FFMPEG_CORE_CDN_URLS = [
+  'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd',
+  'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd',
+];
 
 /**
  * Parse an aspect ratio string like "1:1" or "16:9" into {w, h}.
@@ -77,10 +80,19 @@ export default function App() {
     setFfmpegLoading(true);
     const ffmpeg = new FFmpeg();
     try {
-      await ffmpeg.load({
-        coreURL: await toBlobURL(`${FFMPEG_BASE_URL}/ffmpeg-core.js`, 'text/javascript'),
-        wasmURL: await toBlobURL(`${FFMPEG_BASE_URL}/ffmpeg-core.wasm`, 'application/wasm'),
-      });
+      let lastError = null;
+      for (const baseUrl of FFMPEG_CORE_CDN_URLS) {
+        try {
+          await ffmpeg.load({
+            coreURL: await toBlobURL(`${baseUrl}/ffmpeg-core.js`, 'text/javascript'),
+            wasmURL: await toBlobURL(`${baseUrl}/ffmpeg-core.wasm`, 'application/wasm'),
+          });
+          break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      if (lastError) throw lastError;
       ffmpegRef.current = ffmpeg;
       setFfmpegLoaded(true);
     } finally {
