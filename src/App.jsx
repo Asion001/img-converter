@@ -67,16 +67,17 @@ export default function App() {
   const loadFfmpeg = useCallback(async () => {
     if (ffmpegRef.current) return ffmpegRef.current;
     setFfmpegLoading(true);
-    const ffmpeg = new FFmpeg();
     try {
       let lastError = null;
       let loaded = false;
       for (const baseUrl of FFMPEG_CORE_CDN_URLS) {
         try {
+          const ffmpeg = new FFmpeg();
           await ffmpeg.load({
             coreURL: await toBlobURL(`${baseUrl}/ffmpeg-core.js`, 'text/javascript'),
             wasmURL: await toBlobURL(`${baseUrl}/ffmpeg-core.wasm`, 'application/wasm'),
           });
+          ffmpegRef.current = ffmpeg;
           loaded = true;
           break;
         } catch (error) {
@@ -84,7 +85,6 @@ export default function App() {
         }
       }
       if (!loaded && lastError) throw lastError;
-      ffmpegRef.current = ffmpeg;
       setFfmpegLoaded(true);
     } finally {
       setFfmpegLoading(false);
