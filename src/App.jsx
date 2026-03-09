@@ -87,7 +87,6 @@ export default function App() {
             coreURL: await toBlobURL(`${baseUrl}/ffmpeg-core.js`, 'text/javascript'),
             wasmURL: await toBlobURL(`${baseUrl}/ffmpeg-core.wasm`, 'application/wasm'),
           });
-          lastError = null;
           break;
         } catch (error) {
           lastError = error;
