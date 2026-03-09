@@ -8,8 +8,26 @@ import ImageList from './components/ImageList.jsx';
 
 const FFMPEG_BASE_URL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
 
-/** Rasterise an SVG file to a PNG Blob via OffscreenCanvas / Canvas */
-async function svgToPngBlob(svgFile, maxWidth, maxHeight) {
+/**
+ * Parse an aspect ratio string like "1:1" or "16:9" into {w, h}.
+ * Returns null if the value is empty or invalid.
+ */
+function parseAspectRatio(value) {
+  if (!value || !value.trim()) return null;
+  const parts = value.trim().split(':');
+  if (parts.length !== 2) return null;
+  const w = parseFloat(parts[0]);
+  const h = parseFloat(parts[1]);
+  if (isNaN(w) || isNaN(h) || w <= 0 || h <= 0) return null;
+  return { w, h };
+}
+
+/**
+ * Rasterise an SVG file to a PNG Blob via Canvas.
+ * When fitWidth/fitHeight are provided the image is scaled to fit within them.
+ * allowUpscale=true lets the image grow beyond its natural size (useful for SVG).
+ */
+async function svgToPngBlob(svgFile, fitWidth, fitHeight, allowUpscale = false) {
   const svgText = await svgFile.text();
   const blob = new Blob([svgText], { type: 'image/svg+xml' });
   const url = URL.createObjectURL(blob);
@@ -18,8 +36,19 @@ async function svgToPngBlob(svgFile, maxWidth, maxHeight) {
     img.onload = () => {
       let w = img.naturalWidth || 300;
       let h = img.naturalHeight || 300;
-      if (maxWidth && w > maxWidth) { h = Math.round(h * (maxWidth / w)); w = maxWidth; }
-      if (maxHeight && h > maxHeight) { w = Math.round(w * (maxHeight / h)); h = maxHeight; }
+      if (fitWidth && fitHeight) {
+        const scale = Math.min(fitWidth / w, fitHeight / h);
+        if (scale < 1 || allowUpscale) {
+          w = Math.round(w * scale);
+          h = Math.round(h * scale);
+        }
+      } else if (fitWidth && (fitWidth < w || allowUpscale)) {
+        h = Math.round(h * (fitWidth / w));
+        w = fitWidth;
+      } else if (fitHeight && (fitHeight < h || allowUpscale)) {
+        w = Math.round(w * (fitHeight / h));
+        h = fitHeight;
+      }
       const canvas = document.createElement('canvas');
       canvas.width = w;
       canvas.height = h;
@@ -38,6 +67,7 @@ export default function App() {
   const [quality, setQuality] = useState(80);
   const [maxWidth, setMaxWidth] = useState('');
   const [maxHeight, setMaxHeight] = useState('');
+  const [aspectRatio, setAspectRatio] = useState('1:1');
   const [ffmpegLoaded, setFfmpegLoaded] = useState(false);
   const [ffmpegLoading, setFfmpegLoading] = useState(false);
   const ffmpegRef = useRef(null);
@@ -95,11 +125,34 @@ export default function App() {
     try {
       const mw = maxWidth ? parseInt(maxWidth, 10) : 0;
       const mh = maxHeight ? parseInt(maxHeight, 10) : 0;
+      const ar = parseAspectRatio(aspectRatio);
+
+      // When an aspect ratio is set, compute an explicit canvas size.
+      // maxHeight drives the canvas height; maxWidth is the fallback.
+      let canvasW = 0;
+      let canvasH = 0;
+      if (ar) {
+        if (mh) {
+          canvasH = mh;
+          canvasW = Math.round(mh * (ar.w / ar.h));
+        } else if (mw) {
+          canvasW = mw;
+          canvasH = Math.round(mw * (ar.h / ar.w));
+        }
+        // If no size limit is provided, canvas dimensions are resolved via
+        // FFmpeg expression at encode time (see vfFilter below).
+      }
 
       let inputBlob;
       let inputName;
       if (/\.svg$/i.test(item.file.name)) {
-        inputBlob = await svgToPngBlob(item.file, mw || null, mh || null);
+        // SVG is vector: scale to fill the canvas when aspect ratio is on,
+        // otherwise downscale-only to any size limits.
+        if (ar && canvasW && canvasH) {
+          inputBlob = await svgToPngBlob(item.file, canvasW, canvasH, true);
+        } else {
+          inputBlob = await svgToPngBlob(item.file, mw || null, mh || null, false);
+        }
         inputName = 'input.png';
       } else {
         inputBlob = item.file;
@@ -108,18 +161,48 @@ export default function App() {
 
       await ffmpeg.writeFile(inputName, await fetchFile(inputBlob));
 
-      // Build vf scale filter for size limiting (only downscale, never upscale)
-      let vfScale = '';
-      if (mw && mh) {
-        vfScale = `scale='min(${mw},iw)':'min(${mh},ih)':force_original_aspect_ratio=decrease`;
-      } else if (mw) {
-        vfScale = `scale='min(${mw},iw)':-1`;
-      } else if (mh) {
-        vfScale = `scale=-1:'min(${mh},ih)'`;
+      // Build the FFmpeg video filter chain.
+      let vfFilter = '';
+      if (ar) {
+        if (canvasW && canvasH) {
+          // Fixed canvas: scale to fit (downscale only for raster, handled above for SVG),
+          // ensure RGBA, then pad to exact canvas size with transparent margins.
+          vfFilter = [
+            `scale='min(${canvasW},iw)':'min(${canvasH},ih)':force_original_aspect_ratio=decrease`,
+            'format=rgba',
+            `pad=${canvasW}:${canvasH}:(ow-iw)/2:(oh-ih)/2:color=0x00000000`,
+          ].join(',');
+        } else {
+          // No size limit: expand canvas to the smallest bounding box that matches
+          // the requested aspect ratio and fully contains the image (no upscaling).
+          //
+          // The condition `gte(iw*arH, ih*arW)` checks whether the image is wider
+          // relative to the target ratio (i.e. width is the constraining dimension):
+          //   wider  → canvas_w = iw,          canvas_h = ceil(iw * arH / arW)
+          //   taller → canvas_w = ceil(ih*arW/arH), canvas_h = ih
+          const arW = ar.w;
+          const arH = ar.h;
+          const isWider = `gte(iw*${arH},ih*${arW})`;
+          vfFilter = [
+            'format=rgba',
+            `pad='if(${isWider},iw,ceil(ih*${arW}/${arH}))':` +
+              `'if(${isWider},ceil(iw*${arH}/${arW}),ih)':` +
+              `(ow-iw)/2:(oh-ih)/2:color=0x00000000`,
+          ].join(',');
+        }
+      } else {
+        // No aspect ratio: simple downscale-only, no padding.
+        if (mw && mh) {
+          vfFilter = `scale='min(${mw},iw)':'min(${mh},ih)':force_original_aspect_ratio=decrease`;
+        } else if (mw) {
+          vfFilter = `scale='min(${mw},iw)':-1`;
+        } else if (mh) {
+          vfFilter = `scale=-1:'min(${mh},ih)'`;
+        }
       }
 
       const ffmpegArgs = ['-i', inputName];
-      if (vfScale) ffmpegArgs.push('-vf', vfScale);
+      if (vfFilter) ffmpegArgs.push('-vf', vfFilter);
       ffmpegArgs.push('-quality', String(quality), 'output.webp');
 
       await ffmpeg.exec(ffmpegArgs);
@@ -142,7 +225,7 @@ export default function App() {
         )
       );
     }
-  }, [files, quality, maxWidth, maxHeight, loadFfmpeg]);
+  }, [files, quality, maxWidth, maxHeight, aspectRatio, loadFfmpeg]);
 
   const convertAll = useCallback(async () => {
     const pending = files.filter((f) => f.status === 'idle' || f.status === 'error');
@@ -192,6 +275,8 @@ export default function App() {
               onMaxWidthChange={setMaxWidth}
               maxHeight={maxHeight}
               onMaxHeightChange={setMaxHeight}
+              aspectRatio={aspectRatio}
+              onAspectRatioChange={setAspectRatio}
             />
 
             <div className="actions-bar">

@@ -4,6 +4,7 @@ export default function ConversionSettings({
   quality, onQualityChange,
   maxWidth, onMaxWidthChange,
   maxHeight, onMaxHeightChange,
+  aspectRatio, onAspectRatioChange,
 }) {
   return (
     <div className="card">
@@ -25,14 +26,15 @@ export default function ConversionSettings({
         </div>
 
         <div className="field">
-          <label htmlFor="maxWidth">Max Width (px)</label>
+          <label htmlFor="aspectRatio">
+            Aspect Ratio <span className="field-hint">(W:H, empty = off)</span>
+          </label>
           <input
-            id="maxWidth"
-            type="number"
-            min="1"
-            placeholder="e.g. 1920"
-            value={maxWidth}
-            onChange={(e) => onMaxWidthChange(e.target.value)}
+            id="aspectRatio"
+            type="text"
+            placeholder="e.g. 1:1 or 16:9"
+            value={aspectRatio}
+            onChange={(e) => onAspectRatioChange(e.target.value)}
           />
         </div>
 
@@ -42,9 +44,21 @@ export default function ConversionSettings({
             id="maxHeight"
             type="number"
             min="1"
-            placeholder="e.g. 1080"
+            placeholder="e.g. 256"
             value={maxHeight}
             onChange={(e) => onMaxHeightChange(e.target.value)}
+          />
+        </div>
+
+        <div className="field">
+          <label htmlFor="maxWidth">Max Width (px)</label>
+          <input
+            id="maxWidth"
+            type="number"
+            min="1"
+            placeholder="e.g. 1920"
+            value={maxWidth}
+            onChange={(e) => onMaxWidthChange(e.target.value)}
           />
         </div>
       </div>
@@ -59,4 +73,6 @@ ConversionSettings.propTypes = {
   onMaxWidthChange: PropTypes.func.isRequired,
   maxHeight: PropTypes.string.isRequired,
   onMaxHeightChange: PropTypes.func.isRequired,
+  aspectRatio: PropTypes.string.isRequired,
+  onAspectRatioChange: PropTypes.func.isRequired,
 };
