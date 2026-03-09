@@ -17,11 +17,14 @@ if (typeof window === 'undefined') {
     if (coepCredentialless) {
       newHeaders.set('Cross-Origin-Embedder-Policy', 'credentialless');
     }
-    const request = new Request(r, {
-      mode: r.mode,
+    const requestInit = {
       credentials: coepCredentialless ? 'omit' : r.credentials,
       headers: newHeaders,
-    });
+    };
+    if (r.mode !== 'navigate') {
+      requestInit.mode = r.mode;
+    }
+    const request = new Request(r, requestInit);
     event.respondWith(
       fetch(request).then(response => {
         if (response.status === 0) return response;
