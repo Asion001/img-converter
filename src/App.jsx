@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import JSZip from 'jszip';
@@ -81,18 +81,20 @@ export default function App() {
     const ffmpeg = new FFmpeg();
     try {
       let lastError = null;
+      let loaded = false;
       for (const baseUrl of FFMPEG_CORE_CDN_URLS) {
         try {
           await ffmpeg.load({
             coreURL: await toBlobURL(`${baseUrl}/ffmpeg-core.js`, 'text/javascript'),
             wasmURL: await toBlobURL(`${baseUrl}/ffmpeg-core.wasm`, 'application/wasm'),
           });
+          loaded = true;
           break;
         } catch (error) {
           lastError = error;
         }
       }
-      if (lastError) throw lastError;
+      if (!loaded && lastError) throw lastError;
       ffmpegRef.current = ffmpeg;
       setFfmpegLoaded(true);
     } finally {
@@ -262,6 +264,17 @@ export default function App() {
 
   const hasPending = files.some((f) => f.status === 'idle' || f.status === 'error');
   const hasDone = files.some((f) => f.status === 'done');
+  const isConverting = ffmpegLoading || files.some((f) => f.status === 'converting');
+
+  useEffect(() => {
+    if (!isConverting) return undefined;
+    const handleBeforeUnload = (event) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isConverting]);
 
   return (
     <div className="app">
