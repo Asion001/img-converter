@@ -5,25 +5,12 @@ import JSZip from 'jszip';
 import FileUpload from './components/FileUpload.jsx';
 import ConversionSettings from './components/ConversionSettings.jsx';
 import ImageList from './components/ImageList.jsx';
+import { parseAspectRatio, buildVfFilter, resolveCanvasSize, buildFfmpegArgs } from './utils/conversion.js';
 
 const FFMPEG_CORE_CDN_URLS = [
   'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd',
   'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd',
 ];
-
-/**
- * Parse an aspect ratio string like "1:1" or "16:9" into {w, h}.
- * Returns null if the value is empty or invalid.
- */
-function parseAspectRatio(value) {
-  if (!value || !value.trim()) return null;
-  const parts = value.trim().split(':');
-  if (parts.length !== 2) return null;
-  const w = parseFloat(parts[0]);
-  const h = parseFloat(parts[1]);
-  if (isNaN(w) || isNaN(h) || w <= 0 || h <= 0) return null;
-  return { w, h };
-}
 
 /**
  * Rasterise an SVG file to a PNG Blob via Canvas.
@@ -74,6 +61,8 @@ export default function App() {
   const [ffmpegLoaded, setFfmpegLoaded] = useState(false);
   const [ffmpegLoading, setFfmpegLoading] = useState(false);
   const ffmpegRef = useRef(null);
+  const filesRef = useRef(files);
+  filesRef.current = files;
 
   const loadFfmpeg = useCallback(async () => {
     if (ffmpegRef.current) return ffmpegRef.current;
@@ -128,34 +117,22 @@ export default function App() {
   }, []);
 
   const convertSingle = useCallback(async (id) => {
-    const ffmpeg = await loadFfmpeg();
     setFiles((prev) =>
       prev.map((f) => (f.id === id ? { ...f, status: 'converting', error: null } : f))
     );
 
-    const item = files.find((f) => f.id === id);
-    if (!item) return;
-
     try {
+      const ffmpeg = await loadFfmpeg();
+
+      // Read from ref so we always see the latest files array, even when
+      // convertAll calls us in a loop with a stale closure.
+      const item = filesRef.current.find((f) => f.id === id);
+      if (!item) return;
+
       const mw = maxWidth ? parseInt(maxWidth, 10) : 0;
       const mh = maxHeight ? parseInt(maxHeight, 10) : 0;
       const ar = parseAspectRatio(aspectRatio);
-
-      // When an aspect ratio is set, compute an explicit canvas size.
-      // maxHeight drives the canvas height; maxWidth is the fallback.
-      let canvasW = 0;
-      let canvasH = 0;
-      if (ar) {
-        if (mh) {
-          canvasH = mh;
-          canvasW = Math.round(mh * (ar.w / ar.h));
-        } else if (mw) {
-          canvasW = mw;
-          canvasH = Math.round(mw * (ar.h / ar.w));
-        }
-        // If no size limit is provided, canvas dimensions are resolved via
-        // FFmpeg expression at encode time (see vfFilter below).
-      }
+      const { canvasW, canvasH } = resolveCanvasSize(ar, mw, mh);
 
       let inputBlob;
       let inputName;
@@ -175,56 +152,15 @@ export default function App() {
 
       await ffmpeg.writeFile(inputName, await fetchFile(inputBlob));
 
-      // Build the FFmpeg video filter chain.
-      let vfFilter = '';
-      if (ar) {
-        if (canvasW && canvasH) {
-          // Fixed canvas: scale to fit (downscale only for raster, handled above for SVG),
-          // ensure RGBA, then pad to exact canvas size with transparent margins.
-          vfFilter = [
-            `scale='min(${canvasW},iw)':'min(${canvasH},ih)':force_original_aspect_ratio=decrease`,
-            'format=rgba',
-            `pad=${canvasW}:${canvasH}:(ow-iw)/2:(oh-ih)/2:color=0x00000000`,
-          ].join(',');
-        } else {
-          // No size limit: expand canvas to the smallest bounding box that matches
-          // the requested aspect ratio and fully contains the image (no upscaling).
-          //
-          // The condition `gte(iw*arH, ih*arW)` checks whether the image is wider
-          // relative to the target ratio (i.e. width is the constraining dimension):
-          //   wider  → canvas_w = iw,          canvas_h = ceil(iw * arH / arW)
-          //   taller → canvas_w = ceil(ih*arW/arH), canvas_h = ih
-          const arW = ar.w;
-          const arH = ar.h;
-          const isWider = `gte(iw*${arH},ih*${arW})`;
-          vfFilter = [
-            'format=rgba',
-            `pad='if(${isWider},iw,ceil(ih*${arW}/${arH}))':` +
-              `'if(${isWider},ceil(iw*${arH}/${arW}),ih)':` +
-              `(ow-iw)/2:(oh-ih)/2:color=0x00000000`,
-          ].join(',');
-        }
-      } else {
-        // No aspect ratio: simple downscale-only, no padding.
-        if (mw && mh) {
-          vfFilter = `scale='min(${mw},iw)':'min(${mh},ih)':force_original_aspect_ratio=decrease`;
-        } else if (mw) {
-          vfFilter = `scale='min(${mw},iw)':-1`;
-        } else if (mh) {
-          vfFilter = `scale=-1:'min(${mh},ih)'`;
-        }
-      }
-
-      const ffmpegArgs = ['-i', inputName];
-      if (vfFilter) ffmpegArgs.push('-vf', vfFilter);
-      ffmpegArgs.push('-quality', String(quality), 'output.webp');
+      const vfFilter = buildVfFilter(ar, canvasW, canvasH, mw, mh);
+      const ffmpegArgs = buildFfmpegArgs(inputName, vfFilter, quality);
 
       await ffmpeg.exec(ffmpegArgs);
       const data = await ffmpeg.readFile('output.webp');
       await ffmpeg.deleteFile(inputName);
       await ffmpeg.deleteFile('output.webp');
 
-      const blob = new Blob([data.buffer], { type: 'image/webp' });
+      const blob = new Blob([data], { type: 'image/webp' });
       const resultUrl = URL.createObjectURL(blob);
 
       setFiles((prev) =>
@@ -239,14 +175,15 @@ export default function App() {
         )
       );
     }
-  }, [files, quality, maxWidth, maxHeight, aspectRatio, loadFfmpeg]);
+  }, [quality, maxWidth, maxHeight, aspectRatio, loadFfmpeg]);
 
   const convertAll = useCallback(async () => {
-    const pending = files.filter((f) => f.status === 'idle' || f.status === 'error');
+    // Read pending list from the ref so it reflects the latest state.
+    const pending = filesRef.current.filter((f) => f.status === 'idle' || f.status === 'error');
     for (const f of pending) {
       await convertSingle(f.id);
     }
-  }, [files, convertSingle]);
+  }, [convertSingle]);
 
   const downloadAll = useCallback(async () => {
     const done = files.filter((f) => f.status === 'done' && f.resultBlob);
